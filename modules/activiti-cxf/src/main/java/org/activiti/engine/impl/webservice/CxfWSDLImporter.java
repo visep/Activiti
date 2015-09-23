@@ -12,11 +12,16 @@
  */
 package org.activiti.engine.impl.webservice;
 
+import java.io.IOException;
+import java.net.URL;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.wsdl.Definition;
 import javax.wsdl.Types;
@@ -25,6 +30,7 @@ import javax.wsdl.extensions.schema.Schema;
 import javax.xml.namespace.QName;
 
 import org.activiti.bpmn.model.Import;
+import org.activiti.engine.ActivitiException;
 import org.activiti.engine.impl.bpmn.data.SimpleStructureDefinition;
 import org.activiti.engine.impl.bpmn.data.StructureDefinition;
 import org.activiti.engine.impl.bpmn.parser.BpmnParse;
@@ -32,7 +38,9 @@ import org.activiti.engine.impl.bpmn.parser.XMLImporter;
 import org.activiti.engine.impl.util.ReflectUtil;
 import org.apache.cxf.Bus;
 import org.apache.cxf.BusFactory;
+import org.apache.cxf.common.i18n.UncheckedException;
 import org.apache.cxf.endpoint.dynamic.DynamicClientFactory;
+import org.apache.cxf.resource.URIResolver;
 import org.apache.cxf.service.model.EndpointInfo;
 import org.apache.cxf.service.model.OperationInfo;
 import org.apache.cxf.service.model.ServiceInfo;
@@ -40,6 +48,7 @@ import org.apache.cxf.wsdl.WSDLManager;
 import org.apache.cxf.wsdl11.WSDLServiceBuilder;
 
 import com.ibm.wsdl.extensions.schema.SchemaImpl;
+import com.sun.codemodel.JClass;
 import com.sun.codemodel.JDefinedClass;
 import com.sun.codemodel.JFieldVar;
 import com.sun.tools.xjc.ConsoleErrorReporter;
@@ -53,6 +62,8 @@ import com.sun.tools.xjc.api.XJC;
  * @author Esteban Robles Luna
  */
 public class CxfWSDLImporter implements XMLImporter {
+    
+  protected static final String JAXB_BINDINGS_RESOURCE = "activiti-bindings.xjc";
 
   protected Map<String, WSService> wsServices = new HashMap<String, WSService>();
   protected Map<String, WSOperation> wsOperations = new HashMap<String, WSOperation>();
@@ -67,8 +78,23 @@ public class CxfWSDLImporter implements XMLImporter {
   
   public void importFrom(Import theImport, BpmnParse parse) {
     this.namespace = theImport.getNamespace() == null ? "" : theImport.getNamespace() + ":";
-    this.importFrom(theImport.getLocation());
+    try {
+      final URIResolver uriResolver = new URIResolver(parse.getSourceSystemId(), theImport.getLocation());
+      if (uriResolver.isResolved()) {
+          if (uriResolver.getURI() != null) {
+              this.importFrom(uriResolver.getURI().toString());
+          } else if (uriResolver.isFile()) {
+              this.importFrom(uriResolver.getFile().getAbsolutePath());
+          } else if (uriResolver.getURL() != null) {
+              this.importFrom(uriResolver.getURL().toString());
+          }
+      } else {
+          throw new UncheckedException(new Exception("Unresolved import against " + parse.getSourceSystemId()));
+      }
     this.transferImportsToParse(parse);
+    } catch (final IOException e) {
+      throw new UncheckedException(e);
+    }
   }
   
   private void transferImportsToParse(BpmnParse parse) {
@@ -94,22 +120,33 @@ public class CxfWSDLImporter implements XMLImporter {
 
     try {
       Bus bus = BusFactory.getDefaultBus();
-      DynamicClientFactory.newInstance(bus).createClient(url);
-      WSDLManager wsdlManager = bus.getExtension(WSDLManager.class);  
-      Definition def = wsdlManager.getDefinition(url);
-      WSDLServiceBuilder builder = new WSDLServiceBuilder(bus);
-      List<ServiceInfo> services = builder.buildServices(def);
-      
-      for (ServiceInfo service : services) {
-        WSService wsService = this.importService(service);
-        this.wsServices.put(this.namespace + wsService.getName(), wsService);
-      }
-      
-      if(def != null && def.getTypes() != null) {
-        this.importTypes(def.getTypes());
+      final Enumeration<URL> xjcBindingUrls = Thread.currentThread().getContextClassLoader().getResources(JAXB_BINDINGS_RESOURCE);
+      if (xjcBindingUrls.hasMoreElements()) {
+          final URL xjcBindingUrl = xjcBindingUrls.nextElement(); 
+          if (xjcBindingUrls.hasMoreElements()) {
+              throw new ActivitiException("Several JAXB binding definitions found for activiti-cxf: " + JAXB_BINDINGS_RESOURCE);
+          }
+          DynamicClientFactory.newInstance(bus).createClient(url, Arrays.asList(new String[] { xjcBindingUrl.toString() }));
+          WSDLManager wsdlManager = bus.getExtension(WSDLManager.class);  
+          Definition def = wsdlManager.getDefinition(url);
+          WSDLServiceBuilder builder = new WSDLServiceBuilder(bus);
+          List<ServiceInfo> services = builder.buildServices(def);
+          
+          for (ServiceInfo service : services) {
+            WSService wsService = this.importService(service);
+            this.wsServices.put(this.namespace + wsService.getName(), wsService);
+          }
+          
+          if(def != null && def.getTypes() != null) {
+            this.importTypes(def.getTypes());
+          }
+      } else {
+          throw new ActivitiException("The JAXB binding definitions are not found for activiti-cxf: " + JAXB_BINDINGS_RESOURCE);
       }
     } catch (WSDLException e) {
       e.printStackTrace();
+    } catch (IOException e) {
+        throw new ActivitiException("Error retrieveing the JAXB binding definitions", e);
     }
   }
   
@@ -157,16 +194,28 @@ public class CxfWSDLImporter implements XMLImporter {
     SimpleStructureDefinition structure = new SimpleStructureDefinition(this.namespace + qname.getLocalPart());
     this.structures.put(structure.getId(), structure);
     
-    Map<String, JFieldVar> fields = theClass.fields();
-    int index = 0;
-    for (Entry<String, JFieldVar> entry : fields.entrySet()) {
+    importFields(theClass, structure);
+  }
+  
+  private static void importFields(final JDefinedClass theClass, final SimpleStructureDefinition structure) {
+    final AtomicInteger index = new AtomicInteger(0);
+    _importFields(theClass, index, structure);
+  }
+  
+  private static void _importFields(final JDefinedClass theClass, final AtomicInteger index, final SimpleStructureDefinition structure) {
+      
+    final JClass parentClass = theClass._extends();
+    if (parentClass != null && parentClass instanceof JDefinedClass) {
+      _importFields((JDefinedClass)parentClass, index, structure);
+    }
+    for (Entry<String, JFieldVar> entry : theClass.fields().entrySet()) {
       Class<?> fieldClass = ReflectUtil.loadClass(entry.getValue().type().boxify().fullName());
-      structure.setFieldName(index, entry.getKey(), fieldClass);
-      index++;
+      structure.setFieldName(index.getAndIncrement(), entry.getKey(), fieldClass);
     }
   }
   
   private S2JJAXBModel compileModel(Types types, SchemaCompiler compiler, org.w3c.dom.Element rootTypes) {
+
     Schema schema = (Schema) types.getExtensibilityElements().get(0);
     compiler.parseSchema(schema.getDocumentBaseURI() + "#types1", rootTypes);
     S2JJAXBModel intermediateModel = compiler.bind();

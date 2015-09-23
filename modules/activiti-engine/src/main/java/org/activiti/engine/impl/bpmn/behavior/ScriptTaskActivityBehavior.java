@@ -12,14 +12,13 @@
  */
 package org.activiti.engine.impl.bpmn.behavior;
 
-import javax.script.ScriptException;
-
 import org.activiti.engine.ActivitiException;
 import org.activiti.engine.delegate.BpmnError;
 import org.activiti.engine.impl.bpmn.helper.ErrorPropagation;
 import org.activiti.engine.impl.context.Context;
 import org.activiti.engine.impl.pvm.delegate.ActivityExecution;
 import org.activiti.engine.impl.scripting.ScriptingEngines;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,7 +39,7 @@ public class ScriptTaskActivityBehavior extends TaskActivityBehavior {
   protected String script;
   protected String language;
   protected String resultVariable;
-  protected boolean storeScriptVariables = false; // see http://jira.codehaus.org/browse/ACT-1626
+  protected boolean storeScriptVariables = false; // https://activiti.atlassian.net/browse/ACT-1626
 
   public ScriptTaskActivityBehavior(String script, String language, String resultVariable) {
     this.script = script;
@@ -71,10 +70,9 @@ public class ScriptTaskActivityBehavior extends TaskActivityBehavior {
       LOGGER.warn("Exception while executing " + execution.getActivity().getId() + " : " + e.getMessage());
       
       noErrors = false;
-      if (e.getCause() instanceof ScriptException
-          && e.getCause().getCause() instanceof ScriptException
-          && e.getCause().getCause().getCause() instanceof BpmnError) {
-        ErrorPropagation.propagateError((BpmnError) e.getCause().getCause().getCause(), execution);
+      Throwable rootCause = ExceptionUtils.getRootCause(e);
+      if (rootCause instanceof BpmnError) {
+        ErrorPropagation.propagateError((BpmnError) rootCause, execution);
       } else {
         throw e;
       }

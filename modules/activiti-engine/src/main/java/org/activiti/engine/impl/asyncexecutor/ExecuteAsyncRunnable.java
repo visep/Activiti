@@ -18,7 +18,6 @@ import org.activiti.engine.delegate.event.impl.ActivitiEventBuilder;
 import org.activiti.engine.impl.cmd.ExecuteAsyncJobCmd;
 import org.activiti.engine.impl.cmd.LockExclusiveJobCmd;
 import org.activiti.engine.impl.cmd.UnlockExclusiveJobCmd;
-import org.activiti.engine.impl.context.Context;
 import org.activiti.engine.impl.interceptor.Command;
 import org.activiti.engine.impl.interceptor.CommandConfig;
 import org.activiti.engine.impl.interceptor.CommandContext;
@@ -45,28 +44,25 @@ public class ExecuteAsyncRunnable implements Runnable {
 	}
 
 	public void run() {
-	  CommandContext commandContext = Context.getCommandContext();
 	  
 	  try {
   		if (job.isExclusive()) {
   	    commandExecutor.execute(new LockExclusiveJobCmd(job));
   	  }
   		
-		} catch (ActivitiOptimisticLockingException optimisticLockingException) { 
+		} catch (Throwable lockException) { 
       if (log.isDebugEnabled()) {
-        log.debug("Optimistic locking exception during exclusive job acquisition. If you have multiple job executors running against the same database, " +
-            "this exception means that this thread tried to acquire an exclusive job, which already was changed by another async executor thread." +
-            "This is expected behavior in a clustered environment. " +
-            "You can ignore this message if you indeed have multiple job executor acquisition threads running against the same database. " +
-            "Exception message: {}", optimisticLockingException.getMessage());
+      	log.debug("Exception during exclusive job acquisition. Retrying job.", lockException.getMessage());
       }
       
-      commandContext.getJobEntityManager().retryAsyncJob(job);
+      commandExecutor.execute(new Command<Void>() {
+      	public Void execute(CommandContext commandContext) {
+      		commandContext.getJobEntityManager().retryAsyncJob(job);
+      		return null;
+      	}
+      });
       return;
     
-		} catch (Throwable t) {
-		  log.error("Error while locking exclusive job " + job.getId(), t);
-		  return;
 		}
 		
 		try {

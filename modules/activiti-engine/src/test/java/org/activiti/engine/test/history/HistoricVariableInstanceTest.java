@@ -263,7 +263,7 @@ public class HistoricVariableInstanceTest extends PluggableActivitiTestCase {
 	    assertEquals(historicActivityInstance1.getExecutionId(), update1.getExecutionId());
 	    assertEquals("usertask1", historicActivityInstance1.getActivityId());
 	    
-	    // TODO http://jira.codehaus.org/browse/ACT-1083
+	    // TODO https://activiti.atlassian.net/browse/ACT-1083
 	    assertNotNull(update2.getActivityInstanceId());
 	    HistoricActivityInstance historicActivityInstance2 = historyService.createHistoricActivityInstanceQuery().activityInstanceId(update2.getActivityInstanceId()).singleResult();
 	    assertEquals("usertask2", historicActivityInstance2.getActivityId());
@@ -434,5 +434,26 @@ public class HistoricVariableInstanceTest extends PluggableActivitiTestCase {
      return historyService.createHistoricVariableInstanceQuery().variableName(variableName).singleResult();
    }
    
-  
+   @Deployment
+   public void testRestrictByExecutionId() {
+     if(processEngineConfiguration.getHistoryLevel().isAtLeast(HistoryLevel.FULL)) {
+       ProcessInstance processInstance = runtimeService.startProcessInstanceByKey("myProc");
+       TaskQuery taskQuery = taskService.createTaskQuery();
+       Task userTask = taskQuery.singleResult();
+       assertEquals("userTask1", userTask.getName());
+
+       taskService.complete(userTask.getId(), CollectionUtil.singletonMap("myVar", "test789"));
+
+       assertProcessEnded(processInstance.getId());
+
+       List<HistoricVariableInstance> variables = historyService.createHistoricVariableInstanceQuery().executionId(processInstance.getId()).list();
+       assertEquals(1, variables.size());
+
+       HistoricVariableInstanceEntity historicVariable = (HistoricVariableInstanceEntity) variables.get(0);
+       assertEquals("test456", historicVariable.getTextValue());
+
+       assertEquals(5, historyService.createHistoricActivityInstanceQuery().count());
+       assertEquals(3, historyService.createHistoricDetailQuery().count());
+     }
+   }
 }

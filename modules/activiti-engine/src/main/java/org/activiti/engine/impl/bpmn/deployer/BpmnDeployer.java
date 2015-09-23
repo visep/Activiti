@@ -88,6 +88,7 @@ public class BpmnDeployer implements Deployer {
         BpmnParse bpmnParse = bpmnParser
           .createParse()
           .sourceInputStream(inputStream)
+          .setSourceSystemId(resourceName)
           .deployment(deployment)
           .name(resourceName);
         
@@ -258,27 +259,36 @@ public class BpmnDeployer implements Deployer {
     if (timerDeclarations!=null) {
       for (TimerDeclarationImpl timerDeclaration : timerDeclarations) {
         TimerEntity timer = timerDeclaration.prepareTimerEntity(null);
-        timer.setProcessDefinitionId(processDefinition.getId());
-        
-        // Inherit timer (if appliccable)
-        if (processDefinition.getTenantId() != null) {
-        	timer.setTenantId(processDefinition.getTenantId());
+        if (timer!=null) {
+          timer.setProcessDefinitionId(processDefinition.getId());
+	        
+          // Inherit timer (if appliccable)
+          if (processDefinition.getTenantId() != null) {
+            timer.setTenantId(processDefinition.getTenantId());
+          }
+          timers.add(timer);
         }
-        
-        timers.add(timer);
       }
     }
   }
 
   protected void removeObsoleteTimers(ProcessDefinitionEntity processDefinition) {
-    List<Job> jobsToDelete = Context
-      .getCommandContext()
-      .getJobEntityManager()
-      .findJobsByConfiguration(TimerStartEventJobHandler.TYPE, processDefinition.getKey());
-    
-    for (Job job :jobsToDelete) {
-        new CancelJobsCmd(job.getId()).execute(Context.getCommandContext());
+  	
+  	List<Job> jobsToDelete = null;
+  	
+  	if (processDefinition.getTenantId() != null && !ProcessEngineConfiguration.NO_TENANT_ID.equals(processDefinition.getTenantId())) {
+  		jobsToDelete = Context.getCommandContext().getJobEntityManager().findJobsByTypeAndProcessDefinitionKeyAndTenantId(
+  				TimerStartEventJobHandler.TYPE, processDefinition.getKey(), processDefinition.getTenantId());
+    } else {
+    	jobsToDelete = Context.getCommandContext().getJobEntityManager()
+    			.findJobsByTypeAndProcessDefinitionKeyNoTenantId(TimerStartEventJobHandler.TYPE, processDefinition.getKey());
     }
+
+  	if (jobsToDelete != null) {
+	    for (Job job :jobsToDelete) {
+	        new CancelJobsCmd(job.getId()).execute(Context.getCommandContext());
+	    }
+  	}
   }
   
   protected void removeObsoleteMessageEventSubscriptions(ProcessDefinitionEntity processDefinition, ProcessDefinitionEntity latestProcessDefinition) {

@@ -31,17 +31,17 @@ import org.activiti.engine.test.Deployment;
  */
 public class BoundaryTimerEventTest extends PluggableActivitiTestCase {
   
-  private static boolean listenerExcecutedStartEvent = false;
-  private static boolean listenerExcecutedEndEvent = false;
+  private static boolean listenerExecutedStartEvent = false;
+  private static boolean listenerExecutedEndEvent = false;
   
   public static class MyExecutionListener implements ExecutionListener {
     private static final long serialVersionUID = 1L;
 
     public void notify(DelegateExecution execution) throws Exception {
       if ("end".equals(execution.getEventName())) {
-        listenerExcecutedEndEvent = true;
+        listenerExecutedEndEvent = true;
       } else if ("start".equals(execution.getEventName())) {
-        listenerExcecutedStartEvent = true;
+        listenerExecutedStartEvent = true;
       }
     }    
   }
@@ -118,12 +118,37 @@ public class BoundaryTimerEventTest extends PluggableActivitiTestCase {
     assertEquals(0L, jobQuery.count());
     
     // start execution listener is not executed
-    assertFalse(listenerExcecutedStartEvent);
-    assertTrue(listenerExcecutedEndEvent);
+    assertFalse(listenerExecutedStartEvent);
+    assertTrue(listenerExecutedEndEvent);
 
     // which means the process has ended
     assertProcessEnded(pi.getId());
   }
+  
+
+  @Deployment
+  public void testNullExpressionOnTimer(){
+	  
+    HashMap<String, Object> variables = new HashMap<String, Object>();
+    variables.put("duration", null);
+    
+    // After process start, there should be a timer created
+    ProcessInstance pi = runtimeService.startProcessInstanceByKey("testNullExpressionOnTimer", variables);
+
+    //NO job scheduled as null expression set
+    JobQuery jobQuery = managementService.createJobQuery().processInstanceId(pi.getId());
+    List<Job> jobs = jobQuery.list();
+    assertEquals(0, jobs.size());
+
+    // which means the process is still running waiting for human task input.
+    ProcessInstance processInstance = processEngine
+    	      .getRuntimeService()
+    	      .createProcessInstanceQuery()
+    	      .processInstanceId(pi.getId())
+    	      .singleResult();
+    assertNotNull(processInstance);
+  }
+  
   
   @Deployment
   public void testTimerInSingleTransactionProcess() {

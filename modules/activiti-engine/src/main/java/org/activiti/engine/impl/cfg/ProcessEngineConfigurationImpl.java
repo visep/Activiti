@@ -34,6 +34,7 @@ import java.util.Set;
 import javax.naming.InitialContext;
 import javax.sql.DataSource;
 
+import org.activiti.bpmn.model.BpmnModel;
 import org.activiti.engine.ActivitiException;
 import org.activiti.engine.FormService;
 import org.activiti.engine.HistoryService;
@@ -106,7 +107,6 @@ import org.activiti.engine.impl.calendar.DurationBusinessCalendar;
 import org.activiti.engine.impl.calendar.MapBusinessCalendarManager;
 import org.activiti.engine.impl.cfg.standalone.StandaloneMybatisTransactionContextFactory;
 import org.activiti.engine.impl.db.DbIdGenerator;
-import org.activiti.engine.impl.db.DbSqlSession;
 import org.activiti.engine.impl.db.DbSqlSessionFactory;
 import org.activiti.engine.impl.db.IbatisVariableTypeHandler;
 import org.activiti.engine.impl.delegate.DefaultDelegateInterceptor;
@@ -203,6 +203,8 @@ import org.activiti.engine.impl.variable.EntityManagerSessionFactory;
 import org.activiti.engine.impl.variable.IntegerType;
 import org.activiti.engine.impl.variable.JPAEntityListVariableType;
 import org.activiti.engine.impl.variable.JPAEntityVariableType;
+import org.activiti.engine.impl.variable.JsonType;
+import org.activiti.engine.impl.variable.LongJsonType;
 import org.activiti.engine.impl.variable.LongStringType;
 import org.activiti.engine.impl.variable.LongType;
 import org.activiti.engine.impl.variable.NullType;
@@ -296,6 +298,8 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
   
   protected int processDefinitionCacheLimit = -1; // By default, no limit
   protected DeploymentCache<ProcessDefinitionEntity> processDefinitionCache;
+  protected int bpmnModelCacheLimit = -1; // By default, no limit
+  protected DeploymentCache<BpmnModel> bpmnModelCache;
   
   protected int knowledgeBaseCacheLimit = -1;
   protected DeploymentCache<Object> knowledgeBaseCache;
@@ -388,14 +392,19 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
   protected int batchSizeTasks = 25;
   
   /**
-   * Experimental setting. Default is false.
-   * 
-   * If set to true, in the {@link DbSqlSession} during the handling of delete operations,
-   * those operations of the same type are merged together. 
-   * (eg if you have two 'DELETE from X where id=Y' and 'DELETE from X where id=W', it will be merged
-   * into one delete statement 'DELETE from X where id=Y or id=W'.
+   * If set to true, enables bulk insert (grouping sql inserts together).
+   * Default true. For some databases (eg DB2 on Zos: https://activiti.atlassian.net/browse/ACT-4042) needs to be set to false
    */
-  protected boolean isOptimizeDeleteOperationsEnabled;
+  protected boolean isBulkInsertEnabled = true;
+  
+  /**
+  * Some databases have a limit of how many parameters one sql insert can have (eg SQL Server, 2000 params (!= insert statements) ).
+  * Tweak this parameter in case of exceptions indicating too much is being put into one bulk insert,
+  * or make it higher if your database can cope with it and there are inserts with a huge amount of data.
+  * 
+  * By default: 100.
+  */
+  protected int maxNrOfStatementsInBulkInsert = 100;
   
   protected boolean enableEventDispatcher = true;
   protected ActivitiEventDispatcher eventDispatcher;
@@ -405,6 +414,11 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
   // Event logging to database
   protected boolean enableDatabaseEventLogging = false;
   
+  /**
+   *  Define a max length for storing String variable types in the database.
+   *  Mainly used for the Oracle NVARCHAR2 limit of 2000 characters
+   */
+  protected int maxLengthStringVariableType = 4000;
   
   // buildProcessEngine ///////////////////////////////////////////////////////
   
@@ -611,6 +625,7 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
   protected static Properties databaseTypeMappings = getDefaultDatabaseTypeMappings();
   
   public static final String DATABASE_TYPE_H2 = "h2";
+  public static final String DATABASE_TYPE_HSQL = "hsql";
   public static final String DATABASE_TYPE_MYSQL = "mysql";
   public static final String DATABASE_TYPE_ORACLE = "oracle";
   public static final String DATABASE_TYPE_POSTGRES = "postgres";
@@ -620,12 +635,13 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
   protected static Properties getDefaultDatabaseTypeMappings() {
     Properties databaseTypeMappings = new Properties();
     databaseTypeMappings.setProperty("H2", DATABASE_TYPE_H2);
+    databaseTypeMappings.setProperty("HSQL Database Engine", DATABASE_TYPE_HSQL);
     databaseTypeMappings.setProperty("MySQL", DATABASE_TYPE_MYSQL);
     databaseTypeMappings.setProperty("Oracle", DATABASE_TYPE_ORACLE);
     databaseTypeMappings.setProperty("PostgreSQL", DATABASE_TYPE_POSTGRES);
     databaseTypeMappings.setProperty("Microsoft SQL Server", DATABASE_TYPE_MSSQL);
     databaseTypeMappings.setProperty(DATABASE_TYPE_DB2,DATABASE_TYPE_DB2);
-    databaseTypeMappings.setProperty(DATABASE_TYPE_DB2,DATABASE_TYPE_DB2);
+    databaseTypeMappings.setProperty("DB2",DATABASE_TYPE_DB2);
     databaseTypeMappings.setProperty("DB2/NT",DATABASE_TYPE_DB2);
     databaseTypeMappings.setProperty("DB2/NT64",DATABASE_TYPE_DB2);
     databaseTypeMappings.setProperty("DB2 UDP",DATABASE_TYPE_DB2);
@@ -633,6 +649,7 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
     databaseTypeMappings.setProperty("DB2/LINUX390",DATABASE_TYPE_DB2);
     databaseTypeMappings.setProperty("DB2/LINUXX8664",DATABASE_TYPE_DB2);
     databaseTypeMappings.setProperty("DB2/LINUXZ64",DATABASE_TYPE_DB2);
+    databaseTypeMappings.setProperty("DB2/LINUXPPC64",DATABASE_TYPE_DB2);
     databaseTypeMappings.setProperty("DB2/400 SQL",DATABASE_TYPE_DB2);
     databaseTypeMappings.setProperty("DB2/6000",DATABASE_TYPE_DB2);
     databaseTypeMappings.setProperty("DB2 UDB iSeries",DATABASE_TYPE_DB2);
@@ -786,7 +803,9 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
     if (sessionFactories==null) {
       sessionFactories = new HashMap<Class<?>, SessionFactory>();
 
-      dbSqlSessionFactory = new DbSqlSessionFactory();
+      if (dbSqlSessionFactory == null) {
+        dbSqlSessionFactory = new DbSqlSessionFactory();
+      }
       dbSqlSessionFactory.setDatabaseType(databaseType);
       dbSqlSessionFactory.setIdGenerator(idGenerator);
       dbSqlSessionFactory.setSqlSessionFactory(sqlSessionFactory);
@@ -796,7 +815,8 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
       dbSqlSessionFactory.setTablePrefixIsSchema(tablePrefixIsSchema);
       dbSqlSessionFactory.setDatabaseCatalog(databaseCatalog);
       dbSqlSessionFactory.setDatabaseSchema(databaseSchema);
-      dbSqlSessionFactory.setOptimizeDeleteOperationsEnabled(isOptimizeDeleteOperationsEnabled);
+      dbSqlSessionFactory.setBulkInsertEnabled(isBulkInsertEnabled, databaseType);
+      dbSqlSessionFactory.setMaxNrOfStatementsInBulkInsert(maxNrOfStatementsInBulkInsert);
       addSessionFactory(dbSqlSessionFactory);
       
       addSessionFactory(new GenericManagerFactory(AttachmentEntityManager.class));
@@ -938,7 +958,16 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
         } else {
           processDefinitionCache = new DefaultDeploymentCache<ProcessDefinitionEntity>(processDefinitionCacheLimit);
         }
-      } 
+      }
+      
+      // BpmnModel cache
+      if (bpmnModelCache == null) {
+        if (bpmnModelCacheLimit <= 0) {
+          bpmnModelCache = new DefaultDeploymentCache<BpmnModel>();
+        } else {
+          bpmnModelCache = new DefaultDeploymentCache<BpmnModel>(bpmnModelCacheLimit);
+        }
+      }
       
       // Knowledge base cache (used for Drools business task)
       if (knowledgeBaseCache == null) {
@@ -950,6 +979,7 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
       }
       
       deploymentManager.setProcessDefinitionCache(processDefinitionCache);
+      deploymentManager.setBpmnModelCache(bpmnModelCache);
       deploymentManager.setKnowledgeBaseCache(knowledgeBaseCache);
     }
   }
@@ -1236,8 +1266,8 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
         }
       }
       variableTypes.addType(new NullType());
-      variableTypes.addType(new StringType(4000));
-      variableTypes.addType(new LongStringType(4001));
+      variableTypes.addType(new StringType(maxLengthStringVariableType));
+      variableTypes.addType(new LongStringType(maxLengthStringVariableType + 1));
       variableTypes.addType(new BooleanType());
       variableTypes.addType(new ShortType());
       variableTypes.addType(new IntegerType());
@@ -1245,11 +1275,13 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
       variableTypes.addType(new DateType());
       variableTypes.addType(new DoubleType());
       variableTypes.addType(new UUIDType());
+      variableTypes.addType(new JsonType(maxLengthStringVariableType));
+      variableTypes.addType(new LongJsonType(maxLengthStringVariableType + 1));
       variableTypes.addType(new ByteArrayType());
       variableTypes.addType(new SerializableType());
       variableTypes.addType(new CustomObjectType("item", ItemInstance.class));
       variableTypes.addType(new CustomObjectType("message", MessageInstance.class));
-      if (customPostVariableTypes!=null) {
+      if (customPostVariableTypes != null) {
         for (VariableType customVariableType: customPostVariableTypes) {
           variableTypes.addType(customVariableType);
         }
@@ -2064,6 +2096,32 @@ public abstract class ProcessEngineConfigurationImpl extends ProcessEngineConfig
 	public ProcessEngineConfigurationImpl setEnableDatabaseEventLogging(boolean enableDatabaseEventLogging) {
 		this.enableDatabaseEventLogging = enableDatabaseEventLogging;
     return this;
+	}
+
+  public int getMaxLengthStringVariableType() {
+    return maxLengthStringVariableType;
+  }
+
+  public ProcessEngineConfigurationImpl setMaxLengthStringVariableType(int maxLengthStringVariableType) {
+    this.maxLengthStringVariableType = maxLengthStringVariableType;
+    return this;
+  }
+  
+	public ProcessEngineConfigurationImpl setBulkInsertEnabled(boolean isBulkInsertEnabled) {
+		this.isBulkInsertEnabled = isBulkInsertEnabled;
+		return this;
+	}
+
+	public boolean isBulkInsertEnabled() {
+		return isBulkInsertEnabled;
+	}
+
+	public int getMaxNrOfStatementsInBulkInsert() {
+		return maxNrOfStatementsInBulkInsert;
+	}
+
+	public void setMaxNrOfStatementsInBulkInsert(int maxNrOfStatementsInBulkInsert) {
+		this.maxNrOfStatementsInBulkInsert = maxNrOfStatementsInBulkInsert;
 	}
 	
 }
